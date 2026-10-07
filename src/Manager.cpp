@@ -16,6 +16,8 @@ void Manager::startRound(int startPlayer) {
     firstLeader_ = startPlayer;
     roundWinner_ = -1;
     roundPoints_ = 0;
+    announcer_ = -1;
+    announceCorrect_ = false;
     deck_ = Deck();
     deck_.shuffle(rng_);
     for (auto& h : hands_) h.clear();
@@ -92,24 +94,35 @@ void Manager::next() {
     played_ = {};
     leader_ = winner_;
 
-    bool reached = scores_[0] >= kTargetScore || scores_[1] >= kTargetScore;
-    bool noCards = hands_[0].empty() && hands_[1].empty();
-    if (reached || noCards) endRound();
+    // Plus de cartes sans annonce : personne ne marque.
+    if (hands_[0].empty() && hands_[1].empty()) finishRound(-1, 0);
     else phase_ = Phase::Lead;
 }
 
-// Manche gagnée à 67 points. Points de partie selon le score du perdant :
-// 0 -> 3, 1..32 -> 2, 33 et plus -> 1. Sans 67 (plus de cartes), personne ne marque.
-void Manager::endRound() {
-    roundWinner_ = -1;
-    roundPoints_ = 0;
-    for (int p = 0; p < 2; ++p) {
-        if (scores_[p] < kTargetScore) continue;
-        int loser = scores_[1 - p];
-        roundWinner_ = p;
-        roundPoints_ = loser == 0 ? 3 : (loser < 33 ? 2 : 1);
-        matchScores_[p] += roundPoints_;
+bool Manager::canAnnounce() const {
+    return phase_ == Phase::Lead || phase_ == Phase::Follow || phase_ == Phase::TrickDone;
+}
+
+// Annonce juste : points de partie selon le score du perdant (0 -> 3, 1..32 -> 2,
+// 33 et plus -> 1). Annonce fausse : l'adversaire gagne 3 points.
+bool Manager::announce(int player) {
+    if (!canAnnounce() || player < 0 || player > 1) return false;
+    announcer_ = player;
+    announceCorrect_ = scores_[player] >= kTargetScore;
+    if (announceCorrect_) {
+        int loser = scores_[1 - player];
+        finishRound(player, loser == 0 ? 3 : (loser < 33 ? 2 : 1));
+    } else {
+        finishRound(1 - player, 3);
     }
+    return true;
+}
+
+void Manager::finishRound(int winner, int points) {
+    roundWinner_ = winner;
+    roundPoints_ = points;
+    if (winner >= 0) matchScores_[winner] += points;
+    played_ = {};
     phase_ = (matchScores_[0] >= kMatchTarget || matchScores_[1] >= kMatchTarget)
                  ? Phase::GameOver : Phase::RoundOver;
 }

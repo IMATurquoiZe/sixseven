@@ -8,6 +8,7 @@ find_package(SFML 2.5 COMPONENTS graphics window system REQUIRED)
 
 add_executable(sixseven
     src/main.cpp
+    src/AI.cpp
     src/Card.cpp
     src/Deck.cpp
     src/Manager.cpp

@@ -1,5 +1,6 @@
 #include <SFML/Graphics.hpp>
 #include <string>
+#include "AI.hpp"
 #include "Manager.hpp"
 
 namespace {
@@ -21,11 +22,14 @@ float handStartX(std::size_t n) {
     return (kWinW - (n * (kW + kGap) - kGap)) / 2;
 }
 
+// maxWidth > 0 : le texte est réduit s'il dépasse cette largeur.
 void drawText(sf::RenderWindow& win, const sf::Font& font, const std::string& str,
-              unsigned size, float x, float y, sf::Color color) {
+              unsigned size, float x, float y, sf::Color color, float maxWidth = 0) {
     sf::Text t(sf::String::fromUtf8(str.begin(), str.end()), font, size);
     t.setFillColor(color);
     t.setPosition(x, y);
+    float w = t.getLocalBounds().width;
+    if (maxWidth > 0 && w > maxWidth) t.setScale(maxWidth / w, maxWidth / w);
     win.draw(t);
 }
 
@@ -42,7 +46,6 @@ void drawCard(sf::RenderWindow& win, const sf::Font& font, const Card& c,
     drawText(win, font, c.name(), 20, x + 8, y + 8, col);
     drawText(win, font, c.seasonName(), 16, x + 8, y + 40, col);
     drawText(win, font, "Niv. " + std::to_string(c.level()), 16, x + 8, y + 100, col);
-    drawText(win, font, std::to_string(c.points()) + " pts", 16, x + 8, y + 124, col);
 }
 
 // Indice de la carte sous la souris dans la main du joueur, ou -1.
@@ -57,7 +60,29 @@ int hitHand(const Manager& game, int player, float mx, float my) {
     return -1;
 }
 
-std::string playerName(int p) { return "Joueur " + std::to_string(p + 1); }
+constexpr int kHuman = 0; // joueur du bas ; l'IA est le joueur du haut
+const sf::FloatRect kAnnounceBtn = {330, kWinH - 46, 180, 34};
+
+void drawCardBack(sf::RenderWindow& win, float x, float y) {
+    sf::RectangleShape rect({kW, kH});
+    rect.setPosition(x, y);
+    rect.setFillColor(sf::Color(40, 50, 120));
+    rect.setOutlineColor(sf::Color::Black);
+    rect.setOutlineThickness(2);
+    win.draw(rect);
+}
+
+void drawButton(sf::RenderWindow& win, const sf::Font& font, const sf::FloatRect& r, bool enabled) {
+    sf::RectangleShape rect({r.width, r.height});
+    rect.setPosition(r.left, r.top);
+    rect.setFillColor(enabled ? sf::Color(200, 60, 60) : sf::Color(90, 90, 90));
+    rect.setOutlineColor(sf::Color::Black);
+    rect.setOutlineThickness(2);
+    win.draw(rect);
+    drawText(win, font, "Annoncer 67", 18, r.left + 22, r.top + 5, sf::Color::White);
+}
+
+std::string playerName(int p) { return p == kHuman ? "Le joueur" : "L'IA"; }
 
 } // namespace
 
@@ -70,6 +95,8 @@ int main() {
 
     Manager game;
     game.newGame();
+    AI ai(1 - kHuman);
+    sf::Clock aiClock; // délai de réflexion de l'IA
 
     while (window.isOpen()) {
         sf::Event e;
@@ -83,12 +110,31 @@ int main() {
                 else if (game.phase() == Manager::Phase::GameOver) game.newGame();
             }
 
+            if (e.type == sf::Event::MouseButtonPressed && e.mouseButton.button == sf::Mouse::Left) {
+                sf::Vector2f pos(e.mouseButton.x, e.mouseButton.y);
+                if (kAnnounceBtn.contains(pos)) game.announce(kHuman);
+            }
+
             if (e.type == sf::Event::MouseButtonPressed &&
                 e.mouseButton.button == sf::Mouse::Left &&
-                (game.phase() == Manager::Phase::Lead || game.phase() == Manager::Phase::Follow)) {
-                int idx = hitHand(game, game.currentPlayer(), e.mouseButton.x, e.mouseButton.y);
+                (game.phase() == Manager::Phase::Lead || game.phase() == Manager::Phase::Follow) &&
+                game.currentPlayer() == kHuman) {
+                int idx = hitHand(game, kHuman, e.mouseButton.x, e.mouseButton.y);
                 if (idx >= 0) game.play(idx);
             }
+        }
+
+        // Tour de l'IA : annonce dès qu'elle a 67, sinon joue après une courte pause.
+        if (ai.shouldAnnounce(game)) {
+            game.announce(ai.player());
+        } else if ((game.phase() == Manager::Phase::Lead || game.phase() == Manager::Phase::Follow) &&
+                   game.currentPlayer() == ai.player()) {
+            if (aiClock.getElapsedTime().asSeconds() > 0.8f) {
+                game.play(ai.chooseCard(game));
+                aiClock.restart();
+            }
+        } else {
+            aiClock.restart();
         }
 
         window.clear(sf::Color(30, 100, 60));
@@ -98,20 +144,25 @@ int main() {
 
         // Scores et pioche
         auto scoreLine = [&](int p) {
-            return playerName(p) + " : " + std::to_string(game.score(p)) + " / 67    Partie : " +
-                   std::to_string(game.matchScore(p)) + " / " + std::to_string(Manager::kMatchTarget);
+            return playerName(p) + " — Partie : " + std::to_string(game.matchScore(p)) + " / " +
+                   std::to_string(Manager::kMatchTarget);
         };
-        drawText(window, font, scoreLine(1), 20, 20, 10, white);
-        drawText(window, font, scoreLine(0), 20, 20, kWinH - 40, white);
+        drawText(window, font, scoreLine(ai.player()), 20, 20, 10, white);
+        drawText(window, font, scoreLine(kHuman), 20, 20, kWinH - 40, white);
         drawText(window, font, "Pioche : " + std::to_string(game.deckSize()), 20, kWinW - 160, 10, white);
+
+        drawButton(window, font, kAnnounceBtn, game.canAnnounce());
 
         // Mains
         for (int p = 0; p < 2; ++p) {
-            float y = p == 0 ? kBottomY : kTopY;
+            float y = p == kHuman ? kBottomY : kTopY;
             float x = handStartX(game.hand(p).size());
             bool active = playing && game.currentPlayer() == p;
             for (std::size_t i = 0; i < game.hand(p).size(); ++i) {
-                drawCard(window, font, game.hand(p)[i], x, y, active && game.isLegal(static_cast<int>(i)));
+                if (p == kHuman)
+                    drawCard(window, font, game.hand(p)[i], x, y, active && game.isLegal(static_cast<int>(i)));
+                else
+                    drawCardBack(window, x, y); // main de l'IA cachée
                 x += kW + kGap;
             }
         }
@@ -119,7 +170,7 @@ int main() {
         // Cartes posées au centre : joueur 1 à gauche, joueur 2 à droite
         for (int p = 0; p < 2; ++p) {
             if (!game.played(p)) continue;
-            float x = kWinW / 2.f + (p == 0 ? -kW - 20 : 20);
+            float x = kWinW / 2.f + (p == kHuman ? -kW - 20 : 20);
             drawCard(window, font, *game.played(p), x, kMidY, false);
         }
 
@@ -134,20 +185,27 @@ int main() {
         // Message d'état
         std::string msg;
         if (playing) {
-            msg = playerName(game.currentPlayer()) + " : choisis une carte";
+            msg = game.currentPlayer() == kHuman ? "À toi de jouer" : "L'IA réfléchit...";
         } else if (phase == Manager::Phase::TrickDone) {
             msg = playerName(game.trickWinner()) + " remporte le pli. [Espace] pour continuer";
         } else {
             int rw = game.roundWinner();
-            msg = rw < 0 ? std::string("Manche sans vainqueur")
-                         : playerName(rw) + " gagne la manche (+" +
-                               std::to_string(game.roundPoints()) + ")";
+            if (game.announcer() >= 0)
+                msg = playerName(game.announcer()) + (game.announceCorrect() ? " : annonce juste. "
+                                                                              : " : fausse annonce. ");
+            if (rw < 0) msg += "Manche sans vainqueur";
+            else msg += playerName(rw) + " gagne " + std::to_string(game.roundPoints()) + " pt(s)";
+            // Les points de manche, cachés pendant le jeu, sont révélés.
+            drawText(window, font,
+                     "Points de manche — " + playerName(kHuman) + " : " + std::to_string(game.score(kHuman)) +
+                         "   " + playerName(ai.player()) + " : " + std::to_string(game.score(ai.player())),
+                     20, 200, kMidY + 60, white, kWinW - 220);
             if (phase == Manager::Phase::RoundOver)
                 msg += ". [Espace] manche suivante";
             else
                 msg += ". Partie gagnée ! [Espace] rejouer";
         }
-        drawText(window, font, msg, 20, 200, kMidY - 32, sf::Color::Yellow);
+        drawText(window, font, msg, 20, 200, kMidY - 32, sf::Color::Yellow, kWinW - 220);
 
         window.display();
     }

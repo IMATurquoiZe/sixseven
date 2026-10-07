@@ -36,6 +36,15 @@ public:
     // répond au meneur doit jouer une carte qui gagne le pli s'il en a une.
     bool isLegal(int handIndex) const;
 
+    // Le répondeur gagne-t-il le pli en jouant `follow` face à `lead` ?
+    bool followerWins(const Card& lead, const Card& follow) const;
+
+    // Un joueur annonce qu'il a atteint 67 points (possible à tout moment d'une manche).
+    // Les points sont cachés : si l'annonce est juste, la manche est gagnée avec le
+    // barème habituel ; sinon l'adversaire gagne 3 points de partie.
+    bool canAnnounce() const;
+    bool announce(int player);
+
     // Après un pli résolu : le gagnant pioche en premier, puis nouveau pli.
     void next();
 
@@ -44,7 +53,6 @@ public:
     int leader() const { return leader_; }
     int trickWinner() const { return winner_; } // valide en TrickDone/GameOver
     const std::vector<Card>& hand(int player) const { return hands_[player]; }
-    int score(int player) const { return scores_[player]; }
     const std::optional<Card>& played(int player) const { return played_[player]; }
     std::size_t deckSize() const { return deck_.size(); }
 
@@ -59,14 +67,18 @@ public:
     // qu'il a obtenus. Valides en RoundOver/GameOver.
     int roundWinner() const { return roundWinner_; }
     int roundPoints() const { return roundPoints_; }
+    // Annonce qui a terminé la manche (-1 s'il n'y en a pas eu) et sa justesse.
+    int announcer() const { return announcer_; }
+    bool announceCorrect() const { return announceCorrect_; }
+    // Points de manche, cachés aux joueurs : à n'afficher qu'une fois la manche finie.
+    int score(int player) const { return scores_[player]; }
     // Valide en GameOver.
     int gameWinner() const;
 
 private:
     void draw(int player);
-    bool followerWins(const Card& lead, const Card& follow) const;
     void startRound(int startPlayer);
-    void endRound();
+    void finishRound(int winner, int points);
 
     std::mt19937 rng_;
     Deck deck_;
@@ -80,5 +92,7 @@ private:
     int winner_ = -1;
     int roundWinner_ = -1;
     int roundPoints_ = 0;
+    int announcer_ = -1;
+    bool announceCorrect_ = false;
     Phase phase_ = Phase::Lead;
 };

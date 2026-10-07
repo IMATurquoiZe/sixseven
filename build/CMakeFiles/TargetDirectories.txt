@@ -1,3 +1,0 @@
-/home/biodyne/sixseven/build/CMakeFiles/sixseven.dir
-/home/biodyne/sixseven/build/CMakeFiles/edit_cache.dir
-/home/biodyne/sixseven/build/CMakeFiles/rebuild_cache.dir
