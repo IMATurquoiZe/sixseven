@@ -1,9 +1,30 @@
 #include <SFML/Graphics.hpp>
+#include <filesystem>
 #include <string>
 #include "AI.hpp"
 #include "Manager.hpp"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace {
+
+// Dossier contenant l'exécutable, pour retrouver assets/ quel que soit le dossier courant.
+std::filesystem::path exeDir() {
+#ifdef _WIN32
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return std::filesystem::path(buf).parent_path();
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; return std::filesystem::path(buf).parent_path(); }
+#endif
+    return std::filesystem::current_path();
+}
 
 constexpr float kW = 120, kH = 160, kGap = 10;
 constexpr unsigned kWinW = 1000, kWinH = 640;
@@ -91,7 +112,7 @@ int main() {
     window.setFramerateLimit(60);
 
     sf::Font font;
-    if (!font.loadFromFile("assets/font.ttf")) return 1;
+    if (!font.loadFromFile((exeDir() / "assets" / "font.ttf").string())) return 1;
 
     Manager game;
     game.newGame();
