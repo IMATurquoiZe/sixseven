@@ -1,8 +1,8 @@
 #include <SFML/Graphics.hpp>
 #include <filesystem>
 #include <string>
-#include "AI.hpp"
-#include "Manager.hpp"
+#include <memory>
+#include "Session.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -69,19 +69,17 @@ void drawCard(sf::RenderWindow& win, const sf::Font& font, const Card& c,
     drawText(win, font, "Niv. " + std::to_string(c.level()), 16, x + 8, y + 100, col);
 }
 
-// Indice de la carte sous la souris dans la main du joueur, ou -1.
-int hitHand(const Manager& game, int player, float mx, float my) {
-    float y = player == 0 ? kBottomY : kTopY;
-    if (my < y || my > y + kH) return -1;
-    float x0 = handStartX(game.hand(player).size());
-    for (std::size_t i = 0; i < game.hand(player).size(); ++i) {
+// Indice de la carte sous la souris dans la main du joueur local (en bas), ou -1.
+int hitHand(const GameView& v, float mx, float my) {
+    if (my < kBottomY || my > kBottomY + kH) return -1;
+    float x0 = handStartX(v.hand.size());
+    for (std::size_t i = 0; i < v.hand.size(); ++i) {
         float x = x0 + i * (kW + kGap);
         if (mx >= x && mx <= x + kW) return static_cast<int>(i);
     }
     return -1;
 }
 
-constexpr int kHuman = 0; // joueur du bas ; l'IA est le joueur du haut
 const sf::FloatRect kAnnounceBtn = {330, kWinH - 46, 180, 34};
 
 void drawCardBack(sf::RenderWindow& win, float x, float y) {
@@ -93,17 +91,113 @@ void drawCardBack(sf::RenderWindow& win, float x, float y) {
     win.draw(rect);
 }
 
-void drawButton(sf::RenderWindow& win, const sf::Font& font, const sf::FloatRect& r, bool enabled) {
+void drawButton(sf::RenderWindow& win, const sf::Font& font, const sf::FloatRect& r,
+                const std::string& label, bool enabled, sf::Color color = sf::Color(200, 60, 60)) {
     sf::RectangleShape rect({r.width, r.height});
     rect.setPosition(r.left, r.top);
-    rect.setFillColor(enabled ? sf::Color(200, 60, 60) : sf::Color(90, 90, 90));
+    rect.setFillColor(enabled ? color : sf::Color(90, 90, 90));
     rect.setOutlineColor(sf::Color::Black);
     rect.setOutlineThickness(2);
     win.draw(rect);
-    drawText(win, font, "Annoncer 67", 18, r.left + 22, r.top + 5, sf::Color::White);
+    sf::Text t(sf::String::fromUtf8(label.begin(), label.end()), font, 18);
+    auto b = t.getLocalBounds();
+    t.setPosition(r.left + (r.width - b.width) / 2 - b.left, r.top + (r.height - b.height) / 2 - b.top);
+    t.setFillColor(sf::Color::White);
+    win.draw(t);
 }
 
-std::string playerName(int p) { return p == kHuman ? "Le joueur" : "L'IA"; }
+void drawGame(sf::RenderWindow& window, const sf::Font& font, const Session& session) {
+    const GameView& v = session.view();
+    const std::string me = "Le joueur", opp = session.opponentName();
+    auto name = [&](int p) { return p == 0 ? me : opp; };
+    const sf::Color white = sf::Color::White;
+    const auto phase = v.phase;
+
+    // Scores et pioche
+    auto scoreLine = [&](int p) {
+        return name(p) + " — Partie : " + std::to_string(v.matchScore[p]) + " / " +
+               std::to_string(Manager::kMatchTarget);
+    };
+    drawText(window, font, scoreLine(1), 20, 20, 10, white);
+    drawText(window, font, scoreLine(0), 20, 20, kWinH - 40, white);
+    drawText(window, font, "Pioche : " + std::to_string(v.deckSize), 20, kWinW - 160, 10, white);
+
+    drawButton(window, font, kAnnounceBtn, "Annoncer 67", v.canAnnounce);
+
+    // Mains : la mienne visible en bas, celle de l'adversaire cachée en haut
+    {
+        float x = handStartX(v.hand.size());
+        for (std::size_t i = 0; i < v.hand.size(); ++i, x += kW + kGap)
+            drawCard(window, font, v.hand[i], x, kBottomY, v.legal[i] != 0);
+        x = handStartX(v.opponentHandSize);
+        for (int i = 0; i < v.opponentHandSize; ++i, x += kW + kGap) drawCardBack(window, x, kTopY);
+    }
+
+    // Cartes posées au centre : moi à gauche, l'adversaire à droite
+    for (int p = 0; p < 2; ++p) {
+        if (!v.played[p]) continue;
+        float x = kWinW / 2.f + (p == 0 ? -kW - 20 : 20);
+        drawCard(window, font, *v.played[p], x, kMidY, false);
+    }
+
+    // Carte révélée = saison forte
+    drawText(window, font, "Saison forte", 16, 40, kMidY - 24, white);
+    drawText(window, font, v.revealed.seasonName(), 16, 40, kMidY - 4, seasonColor(v.revealed.season));
+    drawCard(window, font, v.revealed, 40, kMidY + 20, false);
+
+    // Message d'état
+    std::string msg;
+    const std::string continueHint = v.iAmReady ? "en attente de " + opp + "..."
+                                                : (v.opponentReady ? opp + " est prêt. " : "") +
+                                                      "[Clic] pour continuer";
+    if (!session.connected()) {
+        msg = "Connexion perdue. [Échap] pour revenir au menu";
+    } else if (v.playing()) {
+        msg = v.current == 0 ? "À toi de jouer" : opp + " réfléchit...";
+    } else if (phase == Manager::Phase::TrickDone) {
+        msg = name(v.trickWinner) + " remporte le pli. " + continueHint;
+    } else {
+        if (v.announcer >= 0)
+            msg = name(v.announcer) + (v.announceCorrect ? " : annonce juste. " : " : fausse annonce. ");
+        if (v.roundWinner < 0) msg += "Manche sans vainqueur";
+        else msg += name(v.roundWinner) + " gagne " + std::to_string(v.roundPoints) + " pt(s)";
+        // Les points de manche, cachés pendant le jeu, sont révélés.
+        drawText(window, font,
+                 "Points de manche — " + me + " : " + std::to_string(v.score[0]) + "   " + opp +
+                     " : " + std::to_string(v.score[1]),
+                 20, 200, kMidY + 60, white, kWinW - 220);
+        msg += phase == Manager::Phase::RoundOver ? ". Manche suivante : " + continueHint
+                                                  : ". Partie gagnée ! Rejouer : " + continueHint;
+    }
+    drawText(window, font, msg, 20, 200, kMidY - 32, sf::Color::Yellow, kWinW - 220);
+}
+
+enum class Screen { Menu, Hosting, Joining, Playing };
+
+const sf::FloatRect kSoloBtn = {kWinW / 2.f - 150, 230, 300, 50};
+const sf::FloatRect kHostBtn = {kWinW / 2.f - 150, 300, 300, 50};
+const sf::FloatRect kJoinBtn = {kWinW / 2.f - 150, 370, 300, 50};
+
+// "adresse" ou "adresse:port"
+bool connectTo(const std::string& input, std::unique_ptr<Session>& session, std::string& error) {
+    std::string host = input;
+    unsigned port = kDefaultPort;
+    if (auto colon = input.rfind(':'); colon != std::string::npos) {
+        host = input.substr(0, colon);
+        try { port = std::stoul(input.substr(colon + 1)); } catch (...) { port = 0; }
+        if (port == 0 || port > 65535) { error = "Port invalide"; return false; }
+    }
+    sf::IpAddress ip(host);
+    if (host.empty() || ip == sf::IpAddress::None) { error = "Adresse invalide"; return false; }
+    auto socket = std::make_unique<sf::TcpSocket>();
+    if (socket->connect(ip, static_cast<unsigned short>(port), sf::seconds(5)) != sf::Socket::Done) {
+        error = "Connexion impossible à " + host + ":" + std::to_string(port);
+        return false;
+    }
+    socket->setBlocking(false);
+    session = std::make_unique<ClientSession>(std::move(socket));
+    return true;
+}
 
 } // namespace
 
@@ -114,120 +208,121 @@ int main() {
     sf::Font font;
     if (!font.loadFromFile((exeDir() / "assets" / "font.ttf").string())) return 1;
 
-    Manager game;
-    game.newGame();
-    AI ai(1 - kHuman);
-    sf::Clock aiClock; // délai de réflexion de l'IA
+    Screen screen = Screen::Menu;
+    std::unique_ptr<Session> session;
+    sf::TcpListener listener;
+    std::string ipInput, error;
+
+    auto backToMenu = [&] {
+        listener.close();
+        session.reset();
+        screen = Screen::Menu;
+    };
 
     while (window.isOpen()) {
         sf::Event e;
         while (window.pollEvent(e)) {
             if (e.type == sf::Event::Closed) window.close();
-
-            bool advance = (e.type == sf::Event::KeyPressed && e.key.code == sf::Keyboard::Space);
-            if (advance) {
-                if (game.phase() == Manager::Phase::TrickDone) game.next();
-                else if (game.phase() == Manager::Phase::RoundOver) game.nextRound();
-                else if (game.phase() == Manager::Phase::GameOver) game.newGame();
+            if (e.type == sf::Event::KeyPressed && e.key.code == sf::Keyboard::Escape &&
+                screen != Screen::Menu) {
+                backToMenu();
+                continue;
             }
 
-            if (e.type == sf::Event::MouseButtonPressed && e.mouseButton.button == sf::Mouse::Left) {
-                sf::Vector2f pos(e.mouseButton.x, e.mouseButton.y);
-                if (kAnnounceBtn.contains(pos)) game.announce(kHuman);
-            }
+            const bool click = e.type == sf::Event::MouseButtonPressed &&
+                               e.mouseButton.button == sf::Mouse::Left;
+            const sf::Vector2f pos = click ? sf::Vector2f(e.mouseButton.x, e.mouseButton.y) : sf::Vector2f();
 
-            if (e.type == sf::Event::MouseButtonPressed &&
-                e.mouseButton.button == sf::Mouse::Left &&
-                (game.phase() == Manager::Phase::Lead || game.phase() == Manager::Phase::Follow) &&
-                game.currentPlayer() == kHuman) {
-                int idx = hitHand(game, kHuman, e.mouseButton.x, e.mouseButton.y);
-                if (idx >= 0) game.play(idx);
+            switch (screen) {
+                case Screen::Menu:
+                    if (!click) break;
+                    error.clear();
+                    if (kSoloBtn.contains(pos)) {
+                        session = std::make_unique<LocalSession>();
+                        screen = Screen::Playing;
+                    } else if (kHostBtn.contains(pos)) {
+                        listener.setBlocking(false);
+                        if (listener.listen(kDefaultPort) == sf::Socket::Done) screen = Screen::Hosting;
+                        else error = "Port " + std::to_string(kDefaultPort) + " indisponible";
+                    } else if (kJoinBtn.contains(pos)) {
+                        screen = Screen::Joining;
+                    }
+                    break;
+
+                case Screen::Hosting:
+                    break;
+
+                case Screen::Joining:
+                    if (e.type == sf::Event::TextEntered) {
+                        if (e.text.unicode == '\b') { if (!ipInput.empty()) ipInput.pop_back(); }
+                        else if (e.text.unicode > 32 && e.text.unicode < 127 && ipInput.size() < 64)
+                            ipInput += static_cast<char>(e.text.unicode);
+                    } else if (e.type == sf::Event::KeyPressed && e.key.code == sf::Keyboard::Enter) {
+                        error = "Connexion...";
+                        window.clear(sf::Color(30, 100, 60));
+                        drawText(window, font, error, 22, kWinW / 2.f - 70, 330, sf::Color::Yellow);
+                        window.display();
+                        error.clear();
+                        if (connectTo(ipInput, session, error)) screen = Screen::Playing;
+                    }
+                    break;
+
+                case Screen::Playing: {
+                    const GameView& v = session->view();
+                    if (!click) break;
+                    if (kAnnounceBtn.contains(pos)) {
+                        if (v.canAnnounce) session->send(Action{ActionType::Announce});
+                    } else if (int idx = hitHand(v, pos.x, pos.y); idx >= 0) {
+                        if (v.playing() && v.current == 0 && v.legal[idx])
+                            session->send(Action{ActionType::Play, idx});
+                    } else if (!v.playing() && !v.iAmReady) {
+                        // Clic dans le vide : pli / manche suivante, ou nouvelle partie.
+                        session->send(Action{ActionType::Advance});
+                    }
+                    break;
+                }
             }
         }
 
-        // Tour de l'IA : annonce dès qu'elle a 67, sinon joue après une courte pause.
-        if (ai.shouldAnnounce(game)) {
-            game.announce(ai.player());
-        } else if ((game.phase() == Manager::Phase::Lead || game.phase() == Manager::Phase::Follow) &&
-                   game.currentPlayer() == ai.player()) {
-            if (aiClock.getElapsedTime().asSeconds() > 0.8f) {
-                game.play(ai.chooseCard(game));
-                aiClock.restart();
+        // Hôte : attente d'un adversaire
+        if (screen == Screen::Hosting) {
+            auto socket = std::make_unique<sf::TcpSocket>();
+            if (listener.accept(*socket) == sf::Socket::Done) {
+                listener.close();
+                session = std::make_unique<LocalSession>(std::move(socket));
+                screen = Screen::Playing;
             }
-        } else {
-            aiClock.restart();
         }
+        if (session) session->update();
 
         window.clear(sf::Color(30, 100, 60));
         const sf::Color white = sf::Color::White;
-        const auto phase = game.phase();
-        const bool playing = phase == Manager::Phase::Lead || phase == Manager::Phase::Follow;
-
-        // Scores et pioche
-        auto scoreLine = [&](int p) {
-            return playerName(p) + " — Partie : " + std::to_string(game.matchScore(p)) + " / " +
-                   std::to_string(Manager::kMatchTarget);
-        };
-        drawText(window, font, scoreLine(ai.player()), 20, 20, 10, white);
-        drawText(window, font, scoreLine(kHuman), 20, 20, kWinH - 40, white);
-        drawText(window, font, "Pioche : " + std::to_string(game.deckSize()), 20, kWinW - 160, 10, white);
-
-        drawButton(window, font, kAnnounceBtn, game.canAnnounce());
-
-        // Mains
-        for (int p = 0; p < 2; ++p) {
-            float y = p == kHuman ? kBottomY : kTopY;
-            float x = handStartX(game.hand(p).size());
-            bool active = playing && game.currentPlayer() == p;
-            for (std::size_t i = 0; i < game.hand(p).size(); ++i) {
-                if (p == kHuman)
-                    drawCard(window, font, game.hand(p)[i], x, y, active && game.isLegal(static_cast<int>(i)));
-                else
-                    drawCardBack(window, x, y); // main de l'IA cachée
-                x += kW + kGap;
-            }
+        switch (screen) {
+            case Screen::Menu:
+                drawText(window, font, "sixseven", 56, kWinW / 2.f - 130, 100, white);
+                drawButton(window, font, kSoloBtn, "Solo (contre l'IA)", true, sf::Color(40, 100, 180));
+                drawButton(window, font, kHostBtn, "Héberger une partie", true, sf::Color(40, 100, 180));
+                drawButton(window, font, kJoinBtn, "Rejoindre une partie", true, sf::Color(40, 100, 180));
+                drawText(window, font, error, 20, kWinW / 2.f - 150, 450, sf::Color::Yellow);
+                break;
+            case Screen::Hosting:
+                drawText(window, font, "En attente d'un adversaire...", 30, kWinW / 2.f - 190, 220, white);
+                drawText(window, font, "Adresse : " + sf::IpAddress::getLocalAddress().toString() + ":" +
+                                           std::to_string(kDefaultPort),
+                         22, kWinW / 2.f - 190, 290, sf::Color::Yellow);
+                drawText(window, font, "[Échap] pour annuler", 18, kWinW / 2.f - 190, 340, white);
+                break;
+            case Screen::Joining:
+                drawText(window, font, "Adresse de l'hôte (adresse[:port])", 26, kWinW / 2.f - 230, 200, white);
+                drawText(window, font, ipInput + "_", 30, kWinW / 2.f - 230, 260, sf::Color::Yellow);
+                drawText(window, font, error, 20, kWinW / 2.f - 230, 330, sf::Color(255, 160, 160));
+                drawText(window, font, "[Entrée] pour se connecter, [Échap] pour annuler", 18,
+                         kWinW / 2.f - 230, 380, white);
+                break;
+            case Screen::Playing:
+                drawGame(window, font, *session);
+                break;
         }
-
-        // Cartes posées au centre : joueur 1 à gauche, joueur 2 à droite
-        for (int p = 0; p < 2; ++p) {
-            if (!game.played(p)) continue;
-            float x = kWinW / 2.f + (p == kHuman ? -kW - 20 : 20);
-            drawCard(window, font, *game.played(p), x, kMidY, false);
-        }
-
-        // Carte révélée = saison forte
-        {
-            const Card& r = game.revealedCard();
-            drawText(window, font, "Saison forte", 16, 40, kMidY - 24, white);
-            drawText(window, font, r.seasonName(), 16, 40, kMidY - 4, seasonColor(r.season));
-            drawCard(window, font, r, 40, kMidY + 20, false);
-        }
-
-        // Message d'état
-        std::string msg;
-        if (playing) {
-            msg = game.currentPlayer() == kHuman ? "À toi de jouer" : "L'IA réfléchit...";
-        } else if (phase == Manager::Phase::TrickDone) {
-            msg = playerName(game.trickWinner()) + " remporte le pli. [Espace] pour continuer";
-        } else {
-            int rw = game.roundWinner();
-            if (game.announcer() >= 0)
-                msg = playerName(game.announcer()) + (game.announceCorrect() ? " : annonce juste. "
-                                                                              : " : fausse annonce. ");
-            if (rw < 0) msg += "Manche sans vainqueur";
-            else msg += playerName(rw) + " gagne " + std::to_string(game.roundPoints()) + " pt(s)";
-            // Les points de manche, cachés pendant le jeu, sont révélés.
-            drawText(window, font,
-                     "Points de manche — " + playerName(kHuman) + " : " + std::to_string(game.score(kHuman)) +
-                         "   " + playerName(ai.player()) + " : " + std::to_string(game.score(ai.player())),
-                     20, 200, kMidY + 60, white, kWinW - 220);
-            if (phase == Manager::Phase::RoundOver)
-                msg += ". [Espace] manche suivante";
-            else
-                msg += ". Partie gagnée ! [Espace] rejouer";
-        }
-        drawText(window, font, msg, 20, 200, kMidY - 32, sf::Color::Yellow, kWinW - 220);
-
         window.display();
     }
 }
